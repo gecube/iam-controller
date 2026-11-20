@@ -102,10 +102,9 @@ func newFakeIAMResourceManager(fake *fakeIAMPolicyAPI) *resourceManager {
 	}
 }
 
-// policyWithoutARN returns a Policy whose status has no ARN. managed adds the
-// finalizer the runtime puts on a resource right before it calls CreatePolicy.
-func policyWithoutARN(managed bool) *resource {
-	ko := &svcapitypes.Policy{
+// policyWithoutARN returns a Policy whose status has no ARN.
+func policyWithoutARN() *resource {
+	return &resource{ko: &svcapitypes.Policy{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-policy",
 			Namespace: "default",
@@ -114,66 +113,62 @@ func policyWithoutARN(managed bool) *resource {
 			Name:           aws.String("test-policy"),
 			PolicyDocument: aws.String(`{"Version":"2012-10-17","Statement":[]}`),
 		},
-	}
-	if managed {
-		ko.ObjectMeta.Finalizers = []string{FinalizerString}
-	}
-	return &resource{ko: ko}
+	}}
 }
 
-// The controller created the policy, but the ARN never reached the status:
-// the controller stopped right after CreatePolicy, or the status patch failed.
-// The next ReadOne finds the policy by the ARN derived from its name instead
-// of reporting NotFound, which would make the runtime call CreatePolicy again
-// and fail with EntityAlreadyExists.
-func TestReadOne_FindsManagedPolicyWithoutARN(t *testing.T) {
+// ReadOne looks up a Policy whose status has no ARN by the ARN derived from
+// its name. ReadOne does not look at the finalizer, so a resource the
+// controller created but whose ARN never reached the status (the controller
+// stopped right after CreatePolicy, or the status patch failed) and a new
+// resource take the same path here.
+//
+// What the runtime does next depends on the finalizer, and the e2e tests
+// cover it: a managed resource gets its ARN back instead of failing with
+// EntityAlreadyExists (test_lost_arn_is_found_by_name), and a new resource
+// whose name is taken stops with the NotManaged terminal condition
+// (test_existing_policy_by_name). NotFound makes the runtime call CreatePolicy.
+func TestReadOne_PolicyWithoutARN(t *testing.T) {
 	document := `{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:GetObject","Resource":"*"}]}`
-	fake := &fakeIAMPolicyAPI{policies: map[string]string{testPolicyARN: document}}
-	rm := newFakeIAMResourceManager(fake)
 
-	latest, err := rm.ReadOne(context.Background(), policyWithoutARN(true))
-	require.NoError(t, err)
+	tests := []struct {
+		name     string
+		policies map[string]string
+		wantErr  error
+	}{
+		{
+			name:     "policy exists",
+			policies: map[string]string{testPolicyARN: document},
+		},
+		{
+			name:     "policy does not exist",
+			policies: map[string]string{},
+			wantErr:  ackerr.NotFound,
+		},
+	}
 
-	ko := rm.concreteResource(latest).ko
-	require.NotNil(t, ko.Status.ACKResourceMetadata)
-	require.NotNil(t, ko.Status.ACKResourceMetadata.ARN)
-	assert.Equal(t, testPolicyARN, string(*ko.Status.ACKResourceMetadata.ARN))
-	require.NotNil(t, ko.Spec.PolicyDocument)
-	assert.Equal(t, document, *ko.Spec.PolicyDocument)
-
-	require.NotEmpty(t, fake.requests)
-	assert.Equal(t, "GetPolicy", fake.requests[0].Get("Action"))
-	assert.Equal(t, testPolicyARN, fake.requests[0].Get("PolicyArn"))
-}
-
-// A Policy without an ARN whose policy does not exist in AWS is NotFound, so
-// the runtime creates it: a new resource, or a managed one whose controller
-// stopped before CreatePolicy.
-func TestReadOne_PolicyWithoutARNNotFound(t *testing.T) {
-	for _, managed := range []bool{false, true} {
-		t.Run(fmt.Sprintf("managed=%v", managed), func(t *testing.T) {
-			fake := &fakeIAMPolicyAPI{policies: map[string]string{}}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fake := &fakeIAMPolicyAPI{policies: tt.policies}
 			rm := newFakeIAMResourceManager(fake)
 
-			_, err := rm.ReadOne(context.Background(), policyWithoutARN(managed))
-			assert.Equal(t, ackerr.NotFound, err)
-			require.Len(t, fake.requests, 1)
+			latest, err := rm.ReadOne(context.Background(), policyWithoutARN())
+
+			require.NotEmpty(t, fake.requests)
+			assert.Equal(t, "GetPolicy", fake.requests[0].Get("Action"))
 			assert.Equal(t, testPolicyARN, fake.requests[0].Get("PolicyArn"))
+
+			if tt.wantErr != nil {
+				assert.Equal(t, tt.wantErr, err)
+				assert.Len(t, fake.requests, 1)
+				return
+			}
+			require.NoError(t, err)
+			ko := rm.concreteResource(latest).ko
+			require.NotNil(t, ko.Status.ACKResourceMetadata)
+			require.NotNil(t, ko.Status.ACKResourceMetadata.ARN)
+			assert.Equal(t, testPolicyARN, string(*ko.Status.ACKResourceMetadata.ARN))
+			require.NotNil(t, ko.Spec.PolicyDocument)
+			assert.Equal(t, document, *ko.Spec.PolicyDocument)
 		})
 	}
-}
-
-// A new resource whose name is taken by a policy that exists outside the
-// controller finds that policy, like Role does. The runtime then stops with
-// the NotManaged terminal condition, because the resource has no finalizer,
-// instead of calling CreatePolicy and failing with EntityAlreadyExists.
-func TestReadOne_FindsExistingPolicyForNewResource(t *testing.T) {
-	fake := &fakeIAMPolicyAPI{policies: map[string]string{testPolicyARN: `{}`}}
-	rm := newFakeIAMResourceManager(fake)
-
-	latest, err := rm.ReadOne(context.Background(), policyWithoutARN(false))
-	require.NoError(t, err)
-	ko := rm.concreteResource(latest).ko
-	require.NotNil(t, ko.Status.ACKResourceMetadata)
-	assert.Equal(t, testPolicyARN, string(*ko.Status.ACKResourceMetadata.ARN))
 }
