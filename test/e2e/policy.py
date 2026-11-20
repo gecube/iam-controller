@@ -110,6 +110,25 @@ def get(policy_arn):
         return None
 
 
+def delete(policy_arn):
+    """Deletes the Policy with a supplied ARN and its non-default versions
+    from the IAM API.
+
+    If no such Policy exists, does nothing.
+    """
+    c = boto3.client('iam', config=_client_config)
+    try:
+        resp = c.list_policy_versions(PolicyArn=policy_arn)
+        for version in resp['Versions']:
+            if not version['IsDefaultVersion']:
+                c.delete_policy_version(
+                    PolicyArn=policy_arn, VersionId=version['VersionId'],
+                )
+        c.delete_policy(PolicyArn=policy_arn)
+    except c.exceptions.NoSuchEntityException:
+        pass
+
+
 def get_tags(policy_arn):
     """Returns a list containing the tags that have been associated to the
     supplied Policy.
