@@ -14,6 +14,7 @@
 """Integration tests for the IAM Policy resource"""
 
 import json
+import logging
 import time
 
 import pytest
@@ -135,11 +136,17 @@ def adopt_policy(request):
 def cleanup(ref, policy_arn):
     """Deletes what a test left behind after a failed assertion: the resource
     and, if its ARN is known, the IAM policy.
+
+    It runs in a finally block, so it logs its own errors instead of raising
+    them: an exception raised here would hide the one that failed the test.
     """
-    if k8s.get_resource_exists(ref):
-        k8s.delete_custom_resource(ref, period_length=DELETE_WAIT_AFTER_SECONDS)
-    if policy_arn is not None:
-        policy.delete(policy_arn)
+    try:
+        if k8s.get_resource_exists(ref):
+            k8s.delete_custom_resource(ref, period_length=DELETE_WAIT_AFTER_SECONDS)
+        if policy_arn is not None:
+            policy.delete(policy_arn)
+    except Exception:
+        logging.exception(f"cleanup of Policy {ref.name} failed")
 
 
 @service_marker
